@@ -1,5 +1,7 @@
 # RoboterEvolution CUDA 🚀
 
+![RoboterEvolution CUDA Hero Image](assets/cuda_hero_image.png)
+
 **RoboterEvolution CUDA** ist die hochleistungsfähige, GPU-beschleunigte Weiterentwicklung des [RoboterEvolution](https://github.com/tnickel/RoboterEvolution) Projekts. Es handelt sich um eine Multi-Agenten-Simulation, in der Sammler-Roboter und Jäger-Roboter in einem Ökosystem koevolvieren, gesteuert durch neuronale Netze (NEAT).
 
 Durch den Einsatz von **CuPy** und maßgeschneiderten C-Kernels läuft die gesamte Simulationsschleife – inklusive Raycasting-Sensoren, Physik, Kollisionserkennung und Fitness-Evaluation – direkt auf der Grafikkarte. Dies ermöglicht ein Training, das um Größenordnungen schneller ist als die ursprüngliche CPU-Version.
