@@ -47,19 +47,19 @@ Dies öffnet das Launcher-Menü, in dem du wählen kannst:
 
 ```mermaid
 graph TD
-    subgraph CPU [Host (Python / NEAT)]
-        A[NEAT-Populations & Genome] --> B[CudaBatchedNetwork Compile]
-        B --> C{Modus?}
+    subgraph CPU ["Host (Python / NEAT)"]
+        A["NEAT-Populations & Genome"] --> B["CudaBatchedNetwork Compile"]
+        B --> C{"Modus?"}
     end
 
-    subgraph GPU [Device (CuPy / CUDA C)]
-        D[d_sensor_inputs]
-        E[d_motor_outputs]
-        F[d_r_x, d_r_y, d_r_fitness, d_b_active]
+    subgraph GPU ["Device (CuPy / CUDA C)"]
+        D["d_sensor_inputs"]
+        E["d_motor_outputs"]
+        F["d_r_x, d_r_y, d_r_fitness, d_b_active"]
         
-        K1[raycast_kernel]
-        K2[activate_batch_device]
-        K3[physics_kernel]
+        K1["raycast_kernel"]
+        K2["activate_batch_device"]
+        K3["physics_kernel"]
 
         K1 -->|schreibt Sensordaten| D
         D -->|liest Inputs| K2
