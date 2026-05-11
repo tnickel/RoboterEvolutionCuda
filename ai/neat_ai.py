@@ -402,23 +402,24 @@ class CoEvolutionManager:
             if training_mode and collector_batch_net and hunter_batch_net:
                 # FULL CUDA GPU BYPASS
                 from core.cuda_sim import CudaSimulation
-                sim = CudaSimulation(collectors, hunters, world.batteries, world.walls, self.sim_config, collector_batch_net, hunter_batch_net)
-                c_fits, h_fits, alive_arr, bats_active, kills, bats = sim.run_generation(total_frames - current_step)
+                sim = CudaSimulation(collectors, hunters, world.batteries, world.walls, self.sim_config, collector_batch_net, hunter_batch_net, obstacles=world.obstacles)
+                c_fits, h_fits, alive_arr, bats_active, kills, bats, indiv_kills, indiv_bats, bat_x, bat_y, bat_timer = sim.run_generation(total_frames - current_step)
                 
                 for i, c in enumerate(collectors):
                     collector_genome_list[i].fitness += float(c_fits[i])
                     c.alive = bool(alive_arr[i])
+                    c.batteries_collected += int(indiv_bats[i])
                 for i, h in enumerate(hunters):
                     hunter_genome_list[i].fitness += float(h_fits[i])
                     h.alive = bool(alive_arr[len(collectors) + i])
+                    h.kills += int(indiv_kills[len(collectors) + i])
                 
                 # Update world state so rendering (if any) looks okay
                 for i, b in enumerate(world.batteries):
                     b.active = bool(bats_active[i])
-                    
-                # We don't have per-robot stats from GPU, so we assign evenly for the UI to display something
-                if len(collectors) > 0: collectors[0].batteries_collected += bats
-                if len(hunters) > 0: hunters[0].kills += kills
+                    b.x = float(bat_x[i])
+                    b.y = float(bat_y[i])
+                    b.respawn_timer = int(bat_timer[i])
                     
                 current_step = total_frames
                 break  # Skip the CPU loop entirely!

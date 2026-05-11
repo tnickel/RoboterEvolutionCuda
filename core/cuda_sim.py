@@ -131,10 +131,8 @@ __global__ void raycast_kernel(
             }
         }
 
-        // Output features per ray: (dist_norm, type, unused, unused) - in python it expects 5 per ray!
-        // wait, the neural net input is flattened.
-        // In python: c.get_sensor_inputs() returns flat list of 5 values per ray.
-        // Actually `c.get_sensor_inputs()` appends: dist_norm, is_wall, is_battery, is_collector, is_hunter
+        // Fix 2: Sensor-Input-Reihenfolge muss mit entities.py get_sensor_inputs() uebereinstimmen:
+        // [dist, is_battery, is_hunter, is_wall, is_collector]
         
         float dist_norm = closest_dist / max_length;
         
@@ -142,10 +140,10 @@ __global__ void raycast_kernel(
         int base_idx = g * (n_sensor_rays * 5 + 2) + i * 5;
         
         sensor_inputs[base_idx + 0] = dist_norm;
-        sensor_inputs[base_idx + 1] = (closest_type == 1.0f) ? 1.0 : 0.0;
-        sensor_inputs[base_idx + 2] = (closest_type == 2.0f) ? 1.0 : 0.0;
-        sensor_inputs[base_idx + 3] = (closest_type == 3.0f) ? 1.0 : 0.0;
-        sensor_inputs[base_idx + 4] = (closest_type == 4.0f) ? 1.0 : 0.0;
+        sensor_inputs[base_idx + 1] = (closest_type == 2.0f) ? 1.0 : 0.0;  // is_battery
+        sensor_inputs[base_idx + 2] = (closest_type == 4.0f) ? 1.0 : 0.0;  // is_hunter
+        sensor_inputs[base_idx + 3] = (closest_type == 1.0f) ? 1.0 : 0.0;  // is_wall
+        sensor_inputs[base_idx + 4] = (closest_type == 3.0f) ? 1.0 : 0.0;  // is_collector
     }
     
     // 2. Proximity Tracker (Nearest target direction)
@@ -193,14 +191,18 @@ __global__ void physics_kernel(
     float* b_x, float* b_y, int* b_active, float b_radius,
     int n_walls,
     float* w_x1, float* w_y1, float* w_x2, float* w_y2,
+    int n_obstacles,
+    float* obs_left, float* obs_top, float* obs_right, float* obs_bottom,
     float* prev_hunter_dists,
     float c_speed, float h_speed, float w_width, float w_height,
     float fit_idle, float fit_surv, float fit_bat, float fit_prox, 
     float fit_danger, float fit_appr, float fit_kill, float fit_eaten,
     float energy_drain, float bat_energy, float energy_start,
-    float danger_zone, float prox_zone,
+    float danger_zone, float c_prox_zone, float h_prox_zone,
     float* rnd_x, float* rnd_y, int max_rnd, int* rnd_counter,
-    int* stats_kills, int* stats_bats
+    int* stats_kills, int* stats_bats,
+    int bat_respawn_delay, int* b_timer,
+    int* r_eaten, int* indiv_kills, int* indiv_bats
 ) {
     int g = blockIdx.x * blockDim.x + threadIdx.x;
     if (g >= n_robots) return;
@@ -215,21 +217,26 @@ __global__ void physics_kernel(
     
     float m_left = (float)motor_outputs[g * 3 + 0];
     float m_right = (float)motor_outputs[g * 3 + 1];
-    // float radio_out = (float)motor_outputs[g * 3 + 2]; // Not used in simple physics
+    // Motor-Werte klemmen auf [-1, 1] (wie entities.py Robot.move())
+    if (m_left < -1.0f) m_left = -1.0f;
+    if (m_left > 1.0f) m_left = 1.0f;
+    if (m_right < -1.0f) m_right = -1.0f;
+    if (m_right > 1.0f) m_right = 1.0f;
 
-    // 1. Move
+    // 1. Move (Fix 1: Differential Drive mit WHEEL_BASE = 20.0)
     float speed_mult = (rtype == OBJ_COLLECTOR) ? c_speed : h_speed;
     float forward_speed = (m_left + m_right) / 2.0f;
-    float turn_speed = (m_right - m_left) * 0.1f;
+    float turn_speed = (m_right - m_left) / 20.0f;  // WHEEL_BASE = 20.0
     
     float actual_fwd = forward_speed * speed_mult;
     float actual_turn = turn_speed * speed_mult;
     
     ra += actual_turn;
     
-    // Normalize angle (optional but good practice)
-    while (ra > 3.14159265f) ra -= 2.0f * 3.14159265f;
-    while (ra < -3.14159265f) ra += 2.0f * 3.14159265f;
+    // Normalize angle to [0, 2*PI] (wie im Original: angle % (2*pi))
+    float TWO_PI = 2.0f * 3.14159265f;
+    ra = fmodf(ra, TWO_PI);
+    if (ra < 0.0f) ra += TWO_PI;
     
     float nx = rx + cosf(ra) * actual_fwd;
     float ny = ry + sinf(ra) * actual_fwd;
@@ -240,22 +247,48 @@ __global__ void physics_kernel(
     if (ny < rrad) ny = rrad;
     if (ny > w_height - rrad) ny = w_height - rrad;
 
-    // Obstacle collision (simplified circles/AABB interaction for walls? The original code uses AABB for obstacles)
-    // To match perfectly, we would need to do AABB collision against obstacles. 
-    // Wait, the Python code has `obstacles_tuples`. Walls are lines, but check_obstacle_collision_fast uses rectangles.
-    // Let's implement AABB collision for obstacles if passed.
-    // But walls are passed as lines. Actually, in world.py walls are the outer boundary and obstacles are rectangles.
-    // I need to add obstacle support here.
+    // Fix 5: Obstacle AABB collision (identisch mit check_obstacle_collision_fast)
+    float r_sq = rrad * rrad;
+    for (int obs_i = 0; obs_i < n_obstacles; ++obs_i) {
+        float left = obs_left[obs_i];
+        float top = obs_top[obs_i];
+        float right = obs_right[obs_i];
+        float bottom = obs_bottom[obs_i];
+        
+        // Naechster Punkt auf dem Rechteck
+        float closest_x = (nx < left) ? left : ((nx > right) ? right : nx);
+        float closest_y = (ny < top) ? top : ((ny > bottom) ? bottom : ny);
+        
+        float ddx = nx - closest_x;
+        float ddy = ny - closest_y;
+        float dist_sq = ddx * ddx + ddy * ddy;
+        
+        if (dist_sq < r_sq) {
+            float dist = (dist_sq > 0.0f) ? sqrtf(dist_sq) : 0.01f;
+            float overlap = rrad - dist;
+            if (dist > 0.0f) {
+                nx += (ddx / dist) * overlap;
+                ny += (ddy / dist) * overlap;
+            } else {
+                nx += overlap;
+                ny += overlap;
+            }
+        }
+    }
 
     // Update position
     rx = nx;
     ry = ny;
     
-    // 2. Energy
+    // 2. Energy (Fix 3: Jaeger sterben nie an Energiemangel)
     float ren = r_energy[g];
     ren -= energy_drain;
     if (ren <= 0.0f) {
-        r_alive[g] = 0;
+        if (rtype == OBJ_COLLECTOR) {
+            r_alive[g] = 0;
+        } else {
+            ren = 1.0f;  // Jaeger sind unsterblich
+        }
     }
     
     // 3. Fitness Base
@@ -266,8 +299,8 @@ __global__ void physics_kernel(
     // 4. Interactions
     if (rtype == OBJ_COLLECTOR) {
         // Battery collection
-        float nearest_bat_sq = prox_zone * prox_zone;
-        float collect_dist_sq = (rrad + 15.0f) * (rrad + 15.0f);
+        float nearest_bat_sq = c_prox_zone * c_prox_zone;
+        float collect_dist_sq = (rrad + 15.0f) * (rrad + 15.0f);  // Original verwendet hardcoded 15
         
         for (int b = 0; b < n_bats; ++b) {
             if (b_active[b]) {
@@ -278,14 +311,15 @@ __global__ void physics_kernel(
                     int old = atomicExch(&b_active[b], 0);
                     if (old == 1) { // We were the first to grab it
                         ren += bat_energy;
+                        if (ren > energy_start) ren = energy_start;  // Energy cap
                         rfit += fit_bat;
                         atomicAdd(stats_bats, 1);
+                        atomicAdd(&indiv_bats[g], 1);
                         
-                        // Respawn battery immediately
-                        int r_idx = atomicAdd(rnd_counter, 1);
-                        b_x[b] = rnd_x[r_idx % max_rnd];
-                        b_y[b] = rnd_y[r_idx % max_rnd];
-                        b_active[b] = 1;
+                        // Respawn battery (immer ueber Timer wegen Race-Conditions!)
+                        int delay = bat_respawn_delay;
+                        if (delay <= 0) delay = 1; // 1 Frame warten fuer CPU-Paritaet und Race-Fix
+                        b_timer[b] = delay;
                     }
                 } else if (dsq < nearest_bat_sq) {
                     nearest_bat_sq = dsq;
@@ -294,9 +328,9 @@ __global__ void physics_kernel(
         }
         
         // Battery Proximity
-        if (nearest_bat_sq < prox_zone * prox_zone) {
+        if (nearest_bat_sq < c_prox_zone * c_prox_zone) {
             float dist = sqrtf(nearest_bat_sq);
-            rfit += fit_prox * (1.0f - dist / prox_zone);
+            rfit += fit_prox * (1.0f - dist / c_prox_zone);
         }
         
         // Hunter Evasion
@@ -341,16 +375,18 @@ __global__ void physics_kernel(
                     int old = atomicExch(&r_alive[ro], 0);
                     if (old == 1) { // Ate the collector!
                         ren += energy_start;
+                        if (ren > energy_start) ren = energy_start;  // Energy cap
                         rfit += fit_kill;
                         atomicAdd(stats_kills, 1);
-                        atomicAdd(&r_fitness[ro], fit_eaten);
+                        atomicAdd(&indiv_kills[g], 1);
+                        atomicExch(&r_eaten[ro], 1); // Markier als gefressen (fuer CPU Post-Processing)
                     }
                 }
             }
         }
         
-        // Proximity bonus towards collectors
-        float nearest_prey_sq = prox_zone * prox_zone;
+        // Proximity bonus towards collectors (uses hunter_sensor_range, not collector!)
+        float nearest_prey_sq = h_prox_zone * h_prox_zone;
         for (int ro = 0; ro < n_robots; ++ro) {
             if (ro != g && r_type[ro] == OBJ_COLLECTOR && r_alive[ro]) {
                 float dx = r_x[ro] - rx;
@@ -359,9 +395,9 @@ __global__ void physics_kernel(
                 if (dsq < nearest_prey_sq) nearest_prey_sq = dsq;
             }
         }
-        if (nearest_prey_sq < prox_zone * prox_zone) {
+        if (nearest_prey_sq < h_prox_zone * h_prox_zone) {
             float dist = sqrtf(nearest_prey_sq);
-            rfit += 0.1f * (1.0f - dist / prox_zone);
+            rfit += 0.1f * (1.0f - dist / h_prox_zone);
         }
     }
 
@@ -377,7 +413,7 @@ __global__ void physics_kernel(
 '''
 
 class CudaSimulation:
-    def __init__(self, collectors, hunters, batteries, walls, config: SimConfig, collector_net, hunter_net):
+    def __init__(self, collectors, hunters, batteries, walls, config: SimConfig, collector_net, hunter_net, obstacles=None):
         self.config = config
         self.collector_net = collector_net
         self.hunter_net = hunter_net
@@ -456,19 +492,65 @@ class CudaSimulation:
         self.d_w_x2 = cp.asarray(w_x2)
         self.d_w_y2 = cp.asarray(w_y2)
         
+        # Fix 5: Obstacle AABB data
+        if obstacles and len(obstacles) > 0:
+            self.n_obstacles = len(obstacles)
+            o_left = np.array([float(obs.left) for obs in obstacles], dtype=np.float32)
+            o_top = np.array([float(obs.top) for obs in obstacles], dtype=np.float32)
+            o_right = np.array([float(obs.right) for obs in obstacles], dtype=np.float32)
+            o_bottom = np.array([float(obs.bottom) for obs in obstacles], dtype=np.float32)
+        else:
+            self.n_obstacles = 0
+            o_left = np.zeros(1, dtype=np.float32)
+            o_top = np.zeros(1, dtype=np.float32)
+            o_right = np.zeros(1, dtype=np.float32)
+            o_bottom = np.zeros(1, dtype=np.float32)
+        self.d_obs_left = cp.asarray(o_left)
+        self.d_obs_top = cp.asarray(o_top)
+        self.d_obs_right = cp.asarray(o_right)
+        self.d_obs_bottom = cp.asarray(o_bottom)
+        
         # Temp buffers
         self.d_sensor_inputs = cp.zeros((self.n_robots * self.n_inputs,), dtype=cp.float64)
         self.d_motor_outputs = cp.zeros((self.n_robots * self.n_outputs,), dtype=cp.float64)
         self.d_prev_hunter_dists = cp.zeros((self.n_robots * self.n_robots,), dtype=cp.float32)
         
-        # Random respawn buffer
+        # Random respawn buffer (Hindernis-frei!)
         self.max_rnd = 10000
         pad = config.cell_pixel_size
-        rnd_x = np.random.uniform(pad, config.window_width - pad, self.max_rnd).astype(np.float32)
-        rnd_y = np.random.uniform(pad, config.window_height - pad, self.max_rnd).astype(np.float32)
+        rnd_positions = []
+        obs_rects = obstacles if obstacles else []
+        bat_r = 12  # Battery.RADIUS
+        attempts = 0
+        while len(rnd_positions) < self.max_rnd and attempts < self.max_rnd * 10:
+            rx = np.random.uniform(pad, config.window_width - pad)
+            ry = np.random.uniform(pad, config.window_height - pad)
+            valid = True
+            for obs in obs_rects:
+                if (obs.left - bat_r <= rx <= obs.right + bat_r and
+                    obs.top - bat_r <= ry <= obs.bottom + bat_r):
+                    valid = False
+                    break
+            if valid:
+                rnd_positions.append((rx, ry))
+            attempts += 1
+        # Fallback falls nicht genug Positionen
+        while len(rnd_positions) < self.max_rnd:
+            rnd_positions.append((np.random.uniform(pad, config.window_width - pad),
+                                  np.random.uniform(pad, config.window_height - pad)))
+        rnd_x = np.array([p[0] for p in rnd_positions], dtype=np.float32)
+        rnd_y = np.array([p[1] for p in rnd_positions], dtype=np.float32)
         self.d_rnd_x = cp.asarray(rnd_x)
         self.d_rnd_y = cp.asarray(rnd_y)
         self.d_rnd_counter = cp.zeros(1, dtype=cp.int32)
+        
+        # Battery respawn timer
+        self.d_b_timer = cp.zeros(self.n_bats, dtype=cp.int32)
+        
+        # Eaten tracking und Individual Stats
+        self.d_r_eaten = cp.zeros(self.n_robots, dtype=cp.int32)
+        self.d_indiv_kills = cp.zeros(self.n_robots, dtype=cp.int32)
+        self.d_indiv_bats = cp.zeros(self.n_robots, dtype=cp.int32)
         
         # Stats
         self.d_stats_kills = cp.zeros(1, dtype=cp.int32)
@@ -492,7 +574,7 @@ class CudaSimulation:
         h_ray_len = np.float32(self.config.hunter_sensor_ray_length)
         h_fov = np.float32(math.radians(self.config.hunter_sensor_fov))
         
-        bat_radius = np.float32(15.0) # b.RADIUS
+        bat_radius = np.float32(12.0) # Fix 4: Battery.RADIUS = 12
         
         c_speed = np.float32(self.config.collector_speed)
         h_speed = np.float32(self.config.hunter_speed)
@@ -503,8 +585,8 @@ class CudaSimulation:
         fit_surv = np.float32(self.config.fitness_survival_bonus)
         fit_bat = np.float32(self.config.fitness_battery_collected)
         fit_prox = np.float32(self.config.fitness_battery_proximity)
-        fit_danger = np.float32(self.config.fitness_hunter_danger)
-        fit_appr = np.float32(getattr(self.config, 'fitness_hunter_approach_penalty', 15.0))
+        fit_danger = np.float32(max(self.config.fitness_hunter_danger, 0.15))
+        fit_appr = np.float32(max(getattr(self.config, 'fitness_hunter_approach_penalty', 15.0), 15.0))
         fit_kill = np.float32(self.config.fitness_hunter_kill)
         fit_eaten = np.float32(self.config.fitness_eaten_penalty)
         
@@ -513,7 +595,8 @@ class CudaSimulation:
         energy_start = np.float32(self.config.energy_start)
         
         danger_zone = np.float32(self.config.fitness_danger_zone)
-        prox_zone = np.float32(self.config.collector_sensor_ray_length) # proximiy uses collector ray length
+        c_prox_zone = np.float32(self.config.collector_sensor_ray_length)
+        h_prox_zone = np.float32(self.config.hunter_sensor_ray_length)
         
         # Pre-slice arrays for networks
         d_c_inputs = self.d_sensor_inputs[:self.n_col * self.n_inputs]
@@ -556,15 +639,35 @@ class CudaSimulation:
                  self.d_b_x, self.d_b_y, self.d_b_active, bat_radius,
                  np.int32(self.n_walls),
                  self.d_w_x1, self.d_w_y1, self.d_w_x2, self.d_w_y2,
+                 np.int32(self.n_obstacles),
+                 self.d_obs_left, self.d_obs_top, self.d_obs_right, self.d_obs_bottom,
                  self.d_prev_hunter_dists,
                  c_speed, h_speed, w_width, w_height,
                  fit_idle, fit_surv, fit_bat, fit_prox,
                  fit_danger, fit_appr, fit_kill, fit_eaten,
                  energy_drain, bat_energy, energy_start,
-                 danger_zone, prox_zone,
+                 danger_zone, c_prox_zone, h_prox_zone,
                  self.d_rnd_x, self.d_rnd_y, np.int32(self.max_rnd), self.d_rnd_counter,
-                 self.d_stats_kills, self.d_stats_bats)
+                 self.d_stats_kills, self.d_stats_bats,
+                 np.int32(self.config.battery_respawn_delay), self.d_b_timer,
+                 self.d_r_eaten, self.d_indiv_kills, self.d_indiv_bats)
             )
+            
+            # 4. Battery Respawn Timer (immer ausfuehren, auch bei delay <= 0)
+            # Dekrementiere Timer und respawne wenn abgelaufen (GPU-seitig)
+            mask = (self.d_b_timer > 0) & (self.d_b_active == 0)
+            self.d_b_timer[mask] -= 1
+            expired = (self.d_b_timer == 0) & (self.d_b_active == 0)
+            n_expired = int(cp.sum(expired))
+            if n_expired > 0:
+                expired_indices = cp.where(expired)[0]
+                for idx_gpu in expired_indices:
+                    idx = int(idx_gpu)
+                    r_idx = int(self.d_rnd_counter.get()[0])
+                    self.d_b_x[idx] = self.d_rnd_x[r_idx % self.max_rnd]
+                    self.d_b_y[idx] = self.d_rnd_y[r_idx % self.max_rnd]
+                    self.d_b_active[idx] = 1
+                    self.d_rnd_counter += 1
             
         # End of generation, return fitnesses
         final_fitness = self.d_r_fitness.get()
@@ -572,4 +675,22 @@ class CudaSimulation:
         final_bats_active = self.d_b_active.get()
         kills = int(self.d_stats_kills.get()[0])
         bats = int(self.d_stats_bats.get()[0])
-        return final_fitness[:self.n_col], final_fitness[self.n_col:], final_alive, final_bats_active, kills, bats
+        
+        # Race-Condition Fix: eaten_penalty im CPU Post-Processing
+        # Nur Collectors die TATSÄCHLICH gefressen wurden (r_eaten == 1) bekommen die Strafe!
+        eaten_penalty_val = float(self.config.fitness_eaten_penalty)
+        final_eaten = self.d_r_eaten.get()
+        indiv_kills = self.d_indiv_kills.get()
+        indiv_bats = self.d_indiv_bats.get()
+        
+        final_b_x = self.d_b_x.get()
+        final_b_y = self.d_b_y.get()
+        final_b_timer = self.d_b_timer.get()
+        
+        for i in range(self.n_col):
+            if final_eaten[i] == 1:
+                final_fitness[i] += eaten_penalty_val
+        
+        return (final_fitness[:self.n_col], final_fitness[self.n_col:], 
+                final_alive, final_bats_active, kills, bats,
+                indiv_kills, indiv_bats, final_b_x, final_b_y, final_b_timer)
