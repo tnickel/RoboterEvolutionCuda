@@ -190,8 +190,8 @@ __device__ void do_physics(
     float rx = r_x[g]; float ry = r_y[g]; float ra = r_angle[g];
     float rrad = r_radius[g]; int rtype = r_type[g];
 
-    float m_left = (float)motor_outputs[g * 3 + 0];
-    float m_right = (float)motor_outputs[g * 3 + 1];
+    float m_left = (float)motor_outputs[g * 2 + 0];
+    float m_right = (float)motor_outputs[g * 2 + 1];
     if (m_left < -1.0f) m_left = -1.0f; if (m_left > 1.0f) m_left = 1.0f;
     if (m_right < -1.0f) m_right = -1.0f; if (m_right > 1.0f) m_right = 1.0f;
 
@@ -232,9 +232,9 @@ __device__ void do_physics(
         else ren = 1.0f;
     }
     
-    float rfit_delta = 0.0f;
-    if (forward_speed < 0.1f) rfit_delta += fit_idle;
-    rfit_delta += fit_surv;
+    float rfit = r_fitness[g];
+    if (forward_speed < 0.1f) rfit += fit_idle;
+    rfit += fit_surv;
     
     if (rtype == OBJ_COLLECTOR) {
         float nearest_bat_sq = c_prox_zone * c_prox_zone;
@@ -247,8 +247,8 @@ __device__ void do_physics(
                     int old = atomicExch(&b_active[b], 0);
                     if (old == 1) {
                         ren += bat_energy; if (ren > energy_start) ren = energy_start;
-                        rfit_delta += fit_bat;
-                        atomicAdd(&stats_bats[0], 1); atomicAdd(&indiv_bats[g], 1);
+                        rfit += fit_bat;
+                        atomicAdd(stats_bats, 1); atomicAdd(&indiv_bats[g], 1);
                         int delay = bat_respawn_delay; if (delay <= 0) delay = 1;
                         b_timer[b] = delay;
                     }
@@ -256,8 +256,8 @@ __device__ void do_physics(
             }
         }
         if (nearest_bat_sq < c_prox_zone * c_prox_zone) {
-            float d = sqrtf(nearest_bat_sq);
-            rfit_delta += 0.1f * (1.0f - d / c_prox_zone);
+            float dist = sqrtf(nearest_bat_sq);
+            rfit += fit_prox * (1.0f - dist / c_prox_zone);
         }
         float danger_zone_sq = danger_zone * danger_zone;
         for (int ro = 0; ro < n_robots; ++ro) {
@@ -267,12 +267,12 @@ __device__ void do_physics(
                 if (dsq < danger_zone_sq) {
                     float dist = sqrtf(dsq);
                     float penalty = fit_danger * (1.0f - dist / danger_zone);
-                    if (penalty > 0.0f) rfit_delta -= penalty;
+                    if (penalty > 0.0f) rfit -= penalty;
                     float prev_d = prev_hunter_dists[g * n_robots + ro];
                     if (prev_d > 0.0f) {
                         float delta = dist - prev_d;
-                        if (delta > 0.0f) rfit_delta += (delta / c_speed) * 15.0f;
-                        else if (delta < 0.0f) rfit_delta -= (-delta / c_speed) * fit_appr;
+                        if (delta > 0.0f) rfit += (delta / c_speed) * 15.0f;
+                        else if (delta < 0.0f) rfit -= (-delta / c_speed) * fit_appr;
                     }
                     prev_hunter_dists[g * n_robots + ro] = dist;
                 } else prev_hunter_dists[g * n_robots + ro] = 0.0f;
@@ -288,30 +288,29 @@ __device__ void do_physics(
                     int old = atomicExch(&r_alive[ro], 0);
                     if (old == 1) {
                         ren += energy_start; if (ren > energy_start) ren = energy_start;
-                        rfit_delta += fit_kill;
+                        rfit += fit_kill;
                         atomicAdd(stats_kills, 1); atomicAdd(&indiv_kills[g], 1);
                         atomicExch(&r_eaten[ro], 1);
                     }
                 }
             }
         }
-        float nearest_prey_dist_sq = h_prox_zone * h_prox_zone;
+        float nearest_prey_sq = h_prox_zone * h_prox_zone;
         for (int ro = 0; ro < n_robots; ++ro) {
             if (ro != g && r_type[ro] == OBJ_COLLECTOR && r_alive[ro]) {
                 float dx = r_x[ro] - rx; float dy = r_y[ro] - ry;
                 float dsq = dx*dx + dy*dy;
-                if (dsq < nearest_prey_dist_sq) nearest_prey_dist_sq = dsq;
+                if (dsq < nearest_prey_sq) nearest_prey_sq = dsq;
             }
         }
-        if (nearest_prey_dist_sq < h_prox_zone * h_prox_zone) {
-            float d = sqrtf(nearest_prey_dist_sq);
-            rfit_delta += 0.1f * (1.0f - d / h_prox_zone);
+        if (nearest_prey_sq < h_prox_zone * h_prox_zone) {
+            float dist = sqrtf(nearest_prey_sq);
+            rfit += 0.1f * (1.0f - dist / h_prox_zone);
         }
     }
-    atomicAdd(&r_fitness[g], rfit_delta);
 
     r_x[g] = rx; r_y[g] = ry; r_angle[g] = ra;
-    r_energy[g] = ren;
+    r_energy[g] = ren; r_fitness[g] = rfit;
 }
 
 __device__ void do_battery(

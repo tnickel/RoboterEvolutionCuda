@@ -263,7 +263,7 @@ class CoEvolutionManager:
             collector_nets.append(net)
 
         # --- Hall of Fame Gaeste hinzufuegen ---
-        live_guests = self.hall.entries[:5]
+        live_guests = self.injected_entries
         for entry in live_guests:
             try:
                 loaded_genome = self.hall.get_genome(entry)
@@ -403,7 +403,10 @@ class CoEvolutionManager:
                 # FULL CUDA GPU BYPASS
                 from core.cuda_sim import CudaSimulation
                 sim = CudaSimulation(collectors, hunters, world.batteries, world.walls, self.sim_config, collector_batch_net, hunter_batch_net, obstacles=world.obstacles)
-                c_fits, h_fits, alive_arr, bats_active, kills, bats, indiv_kills, indiv_bats, bat_x, bat_y, bat_timer = sim.run_generation(total_frames - current_step)
+                if hasattr(sim, 'run_generation_mega'):
+                    c_fits, h_fits, alive_arr, bats_active, kills, bats, indiv_kills, indiv_bats, bat_x, bat_y, bat_timer = sim.run_generation_mega(total_frames - current_step)
+                else:
+                    c_fits, h_fits, alive_arr, bats_active, kills, bats, indiv_kills, indiv_bats, bat_x, bat_y, bat_timer = sim.run_generation(total_frames - current_step)
                 
                 for i, c in enumerate(collectors):
                     collector_genome_list[i].fitness += float(c_fits[i])

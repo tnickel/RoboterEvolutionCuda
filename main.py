@@ -8,6 +8,11 @@ Die besten Gehirne werden in der Hall of Fame gespeichert.
 
 import sys
 import ctypes
+import warnings
+
+# Unterdrücke die harmlose CuPy-Warnung bzgl. CUDA_PATH, da die Pip-Version ihre eigenen Binaries nutzt
+warnings.filterwarnings("ignore", message="CUDA path could not be detected.*")
+
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1) # Behebt falsche Fenstergrößen bei Windows-Skalierung > 100%
 except Exception:

@@ -391,9 +391,9 @@ class HallOfFameMenu:
             pygame.draw.line(screen, COLOR_ACCENT,
                              (30, footer_y), (self.MENU_WIDTH - 30, footer_y), 2)
 
-            btn_w, btn_h = 320, 76
-            btn_gap = 40
-            total_w = 3 * btn_w + 2 * btn_gap
+            btn_w, btn_h = 280, 76
+            btn_gap = 25
+            total_w = 4 * btn_w + 3 * btn_gap
             start_x = (self.MENU_WIDTH - total_w) // 2
             btn_y = footer_y + 25
 
@@ -407,8 +407,17 @@ class HallOfFameMenu:
             lbl = font.render(sel_text, True, COLOR_BUTTON_TEXT)
             screen.blit(lbl, lbl.get_rect(center=btn_start_rect.center))
 
+            # Alle auswählen-Button
+            btn_select_all_rect = pygame.Rect(start_x + btn_w + btn_gap, btn_y, btn_w, btn_h)
+            btn_select_all_hover = btn_select_all_rect.collidepoint(mouse_pos)
+            pygame.draw.rect(screen,
+                             COLOR_BUTTON_HOVER if btn_select_all_hover else (60, 140, 180),
+                             btn_select_all_rect, border_radius=12)
+            lbl_all = font.render("Alle auswaehlen", True, COLOR_TEXT)
+            screen.blit(lbl_all, lbl_all.get_rect(center=btn_select_all_rect.center))
+
             # Zurück-Button
-            btn_back_rect = pygame.Rect(start_x + btn_w + btn_gap, btn_y, btn_w, btn_h)
+            btn_back_rect = pygame.Rect(start_x + 2 * (btn_w + btn_gap), btn_y, btn_w, btn_h)
             btn_back_hover = btn_back_rect.collidepoint(mouse_pos)
             pygame.draw.rect(screen,
                              COLOR_BUTTON_HOVER if btn_back_hover else (80, 80, 100),
@@ -417,7 +426,7 @@ class HallOfFameMenu:
             screen.blit(lbl2, lbl2.get_rect(center=btn_back_rect.center))
 
             # Alles Löschen-Button
-            btn_clear_rect = pygame.Rect(start_x + 2 * (btn_w + btn_gap), btn_y, btn_w, btn_h)
+            btn_clear_rect = pygame.Rect(start_x + 3 * (btn_w + btn_gap), btn_y, btn_w, btn_h)
             btn_clear_hover = btn_clear_rect.collidepoint(mouse_pos)
             color_clear = (220, 80, 80) if btn_clear_hover else (180, 50, 50)
             pygame.draw.rect(screen, color_clear, btn_clear_rect, border_radius=12)
@@ -429,6 +438,9 @@ class HallOfFameMenu:
                 if btn_start_rect.collidepoint(mouse_pos):
                     self.running = False
                     self.result = 'start'
+                elif btn_select_all_rect.collidepoint(mouse_pos):
+                    self.selected = set(range(len(self.hall.entries)))
+                    pygame.time.delay(200)
                 elif btn_back_rect.collidepoint(mouse_pos):
                     self.running = False
                     self.result = 'back'
